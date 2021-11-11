@@ -1,66 +1,35 @@
 #ifndef WAIFU2X_HPP
 #define WAIFU2X_HPP
 
-#define RGB_CHANNELS 3
-
 #include <string>
-#include <mutex>
-#include <condition_variable>
+
+// ncnn
 #include "net.h"
 #include "gpu.h"
+#include "layer.h"
 
 class Waifu2x
 {
 public:
-    Waifu2x(int width, int height, int scale, int tilesizew, int tilesizeh, int gpuid, int gputhread,
-            int precision, int prepadding, const std::string& parampath, const std::string& modelpath);
+    Waifu2x(int gpuid, int num_threads = 1, bool tta_mode = false);
     ~Waifu2x();
 
-    int process(const float *srcR, const float *srcG, const float *srcB, float *dstR, float *dstG, float *dstB, ptrdiff_t srcStride, ptrdiff_t dstStride) const;
+    int load(const std::string& parampath, const std::string& modelpath);
 
-    enum {
-        ERROR_OK = 0,
-        ERROR_EXTRACTOR = -1,
-        ERROR_SUBMIT = -2,
-        ERROR_UPLOAD = -3,
-        ERROR_DOWNLOAD = -4
-    };
+    int process(const float* srcpR, const float* srcpG, const float* srcpB, float* dstpR, float* dstpG, float* dstpB, int width, int height, int src_stride, int dst_stride) const;
 
-private:
-    int width;
-    int height;
+public:
+    int noise;
     int scale;
-    int tilesizew;
-    int tilesizeh;
+    int tilesize_w;
+    int tilesize_h;
     int prepadding;
 
-    ncnn::Net net;
-    ncnn::Pipeline* waifu2x_preproc;
-    ncnn::Pipeline* waifu2x_postproc;
-
-    class Semaphore {
-    private:
-        int val;
-        std::mutex mtx;
-        std::condition_variable cv;
-    public:
-        explicit Semaphore(int init_value) : val(init_value) {
-        }
-        void wait() {
-            std::unique_lock<std::mutex> lock(mtx);
-            while (val <= 0) {
-                cv.wait(lock);
-            }
-            val--;
-        }
-        void signal() {
-            std::lock_guard<std::mutex> guard(mtx);
-            val++;
-            cv.notify_one();
-        }
-    };
-
-    mutable Semaphore semaphore;
+private:
+    ncnn::Net _net;
+    ncnn::Pipeline* _preproc;
+    ncnn::Pipeline* _postproc;
+    bool _tta_mode;
 };
 
 #endif

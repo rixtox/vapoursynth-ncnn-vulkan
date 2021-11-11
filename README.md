@@ -9,7 +9,7 @@ Download pre-built binaries and model files from [releases](https://github.com/N
 ## Usage
 
 ```
-core.w2xnvk.Waifu2x(clip[, noise, scale, model, tile_size, gpu_id, gpu_thread, precision, tile_size_w, tile_size_h])
+core.ncnn.Waifu2x(clip[, noise, scale, model, tile_size, gpu_id, gpu_thread, precision, tile_size_w, tile_size_h])
 ```
 
 * clip: Input clip. Only 32-bit float RGB is supported.
@@ -39,6 +39,23 @@ core.w2xnvk.Waifu2x(clip[, noise, scale, model, tile_size, gpu_id, gpu_thread, p
 * precision: Floating-point precision. Single-precision (fp32) is slow but more precise in color. Default is half-precision (fp16). (int 16/32, default=16)
 
 * tile_size_w / tile_size_h: Override width and height of tile_size.
+
+> > TTA
+> 
+> TTA(test-time augmentation) mode averages the upscaling results of the following 8 augmented inputs. ![tta](https://cloud.githubusercontent.com/assets/287255/16225442/86dab704-37e1-11e6-9bbc-093819cd3f6f.png) TTA mode able to reduce several type of artifacts but it's 8x slower than non TTA mode.
+> 
+> > split size
+> 
+> block size(px) for block processing. larger size might be faster but it increases memory usage. When split size is too large for your GPU memory, runtime error(out of memory) might occur.
+> 
+> > video
+> 
+> 1. convert video(all frames) to PNG images (with ffmepg)
+> 2. waifu2x
+> 3. convert waifu2xed images to video (with ffmpeg)
+> 
+> See https://github.com/nagadomi/waifu2x#video-encoding
+> From: https://github.com/nagadomi/waifu2x/issues/148#issuecomment-255754265
 
 ## Performance Comparison
 

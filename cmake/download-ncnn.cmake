@@ -28,6 +28,7 @@ if (NOT DEFINED ncnn_ROOT)
                     VERBOSE )
             endif ()
             file(RENAME ${CMAKE_CURRENT_LIST_DIR}/../vendor/${_NCNN_FILE_NAME} ${ncnn_ROOT})
+            file(REMOVE ${CMAKE_CURRENT_LIST_DIR}/../vendor/${_NCNN_FILE_NAME}.zip)
         endif ()
     endif ()
 

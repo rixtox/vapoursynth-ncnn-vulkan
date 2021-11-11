@@ -25,36 +25,22 @@
 
 #include <fstream>
 #include <algorithm>
-#include <vapoursynth/VSHelper.h>
+
+#include "filter-common.hpp"
+#include "waifu2x-filter.hpp"
 #include "gpu.h"
 #include "waifu2x.hpp"
-
-static ncnn::Mutex instanceLock;
-static int instanceCounter = 0;
-
-static int tryCreateGpuInstance() {
-    ncnn::MutexLockGuard lg(instanceLock);
-    if (instanceCounter++ == 0) {
-        return ncnn::create_gpu_instance();
-    } else {
-        return 0;
-    }
-}
-
-static void tryDestoryGpuInstance() {
-    ncnn::MutexLockGuard lg(instanceLock);
-    if (--instanceCounter == 0) {
-        ncnn::destroy_gpu_instance();
-    }
-}
+#include "vsplugin.hpp"
 
 typedef struct {
     VSNodeRef *node;
     VSVideoInfo vi;
     Waifu2x *waifu2x;
-} FilterData;
+} Waifu2xFilterData;
 
-static int filter(const VSFrameRef *src, VSFrameRef *dst, FilterData * const VS_RESTRICT d, const VSAPI *vsapi) noexcept {
+static int Waifu2xFilter(const VSFrameRef *src, VSFrameRef *dst, Waifu2xFilterData * const VS_RESTRICT d, const VSAPI *vsapi) noexcept {
+    const int width = vsapi->getFrameWidth(src, 0);
+    const int height = vsapi->getFrameHeight(src, 0);
     const int srcStride = vsapi->getStride(src, 0) / static_cast<int>(sizeof(float));
     const int dstStride = vsapi->getStride(dst, 0) / static_cast<int>(sizeof(float));
     auto *             srcR = reinterpret_cast<const float *>(vsapi->getReadPtr(src, 0));
@@ -63,60 +49,46 @@ static int filter(const VSFrameRef *src, VSFrameRef *dst, FilterData * const VS_
     auto * VS_RESTRICT dstR = reinterpret_cast<float *>(vsapi->getWritePtr(dst, 0));
     auto * VS_RESTRICT dstG = reinterpret_cast<float *>(vsapi->getWritePtr(dst, 1));
     auto * VS_RESTRICT dstB = reinterpret_cast<float *>(vsapi->getWritePtr(dst, 2));
-    return d->waifu2x->process(srcR, srcG, srcB, dstR, dstG, dstB, srcStride, dstStride);
+    return d->waifu2x->process(srcR, srcG, srcB, dstR, dstG, dstB, width, height, srcStride, dstStride);
 }
 
-static void VS_CC filterInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
-    auto *d = static_cast<FilterData *>(*instanceData);
+static void VS_CC Waifu2xFilterInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
+    auto *d = static_cast<Waifu2xFilterData *>(*instanceData);
     vsapi->setVideoInfo(&d->vi, 1, node);
 }
 
-static const VSFrameRef *VS_CC filterGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
-    auto *d = static_cast<FilterData *>(*instanceData);
+static const VSFrameRef *VS_CC Waifu2xFilterGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+    auto *d = static_cast<Waifu2xFilterData *>(*instanceData);
 
     if (activationReason == arInitial) {
         vsapi->requestFrameFilter(n, d->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
-        auto src = vsapi->getFrameFilter(n, d->node, frameCtx);
-        auto dst = vsapi->newVideoFrame(d->vi.format, d->vi.width, d->vi.height, src, core);
-
-        int err = filter(src, dst, d, vsapi);
-        switch (err) {
-            case Waifu2x::ERROR_OK:
-                vsapi->freeFrame(src);
-                return dst;
-            case Waifu2x::ERROR_EXTRACTOR:
-                vsapi->setFilterError("Waifu2x-NCNN-Vulkan: Waifu2x extractor error. Try to decrease tile_size or gpu_thread", frameCtx);
-                vsapi->freeFrame(src);
-                vsapi->freeFrame(dst);
-                return nullptr;
-            case Waifu2x::ERROR_DOWNLOAD:
-            case Waifu2x::ERROR_UPLOAD:
-            case Waifu2x::ERROR_SUBMIT:
-                vsapi->setFilterError("Waifu2x-NCNN-Vulkan: Waifu2x submit error. Try to decrease gpu_thread", frameCtx);
-                vsapi->freeFrame(src);
-                vsapi->freeFrame(dst);
-                return nullptr;
+        const VSFrameRef *src = vsapi->getFrameFilter(n, d->node, frameCtx);
+        VSFrameRef *dst = vsapi->newVideoFrame(d->vi.format, d->vi.width, d->vi.height, src, core);
+        int err = Waifu2xFilter(src, dst, d, vsapi);
+        if (err) {
+            vsapi->setFilterError("Waifu2x-NCNN-Vulkan: Waifu2x filter error.", frameCtx);
+        } else {
+            return dst;
         }
     }
-
     return nullptr;
 }
 
-static void VS_CC filterFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
-    auto *d = static_cast<FilterData *>(instanceData);
+static void VS_CC Waifu2xFilterFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
+    auto *d = static_cast<Waifu2xFilterData *>(instanceData);
     vsapi->freeNode(d->node);
     delete d->waifu2x;
     delete d;
     tryDestoryGpuInstance();
 }
 
-static void VS_CC filterCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
-    FilterData d{};
+void VS_CC Waifu2xFilterCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+    Waifu2xFilterData d{};
     d.node = vsapi->propGetNode(in, "clip", 0, nullptr);
     d.vi = *vsapi->getVideoInfo(d.node);
 
-    int gpuId, noise, scale, model, tileSizeW, tileSizeH, gpuThread, precision;
+    int gpuId, ttaMode, noise, scale, model, tileSizeW, tileSizeH, gpuThread, precision;
     std::string paramPath, modelPath;
     char const * err_prompt = nullptr;
     do {
@@ -136,6 +108,12 @@ static void VS_CC filterCreate(const VSMap *in, VSMap *out, void *userData, VSCo
         gpuId = int64ToIntS(vsapi->propGetInt(in, "gpu_id", 0, &err));
         if (gpuId < 0 || gpuId >= ncnn::get_gpu_count()) {
             err_prompt = "invalid 'gpu_id'";
+            break;
+        }
+
+        ttaMode = int64ToIntS(vsapi->propGetInt(in, "tta_mode", 0, &err));
+        if (ttaMode < 0 || ttaMode > 1) {
+            err_prompt = "'tta_mode' must be 0 or 1";
             break;
         }
 
@@ -234,16 +212,16 @@ static void VS_CC filterCreate(const VSMap *in, VSMap *out, void *userData, VSCo
         }
 
         // set model path
-        const std::string pluginFilePath{ vsapi->getPluginPath(vsapi->getPluginById("net.nlzy.vsw2xnvk", core)) };
+        const std::string pluginFilePath{ vsapi->getPluginPath(vsapi->getPluginById(VSPLUGIN_IDENTIFIER_STR, core)) };
         const std::string pluginDir = pluginFilePath.substr(0, pluginFilePath.find_last_of('/'));
 
-        std::string modelsDir;
+        std::string modelsDir = pluginDir + "/ncnn-models/Waifu2x/";
         if (model == 0)
-            modelsDir += pluginDir + "/models-upconv_7_anime_style_art_rgb/";
+            modelsDir += "models-upconv_7_anime_style_art_rgb/";
         else if (model == 1)
-            modelsDir += pluginDir + "/models-upconv_7_photo/";
+            modelsDir += "models-upconv_7_photo/";
         else
-            modelsDir += pluginDir + "/models-cunet/";
+            modelsDir += "models-cunet/";
 
         std::string modelName;
         if (noise == -1)
@@ -282,26 +260,19 @@ static void VS_CC filterCreate(const VSMap *in, VSMap *out, void *userData, VSCo
     else
         prepadding = 7;
 
-    d.waifu2x = new Waifu2x(d.vi.width, d.vi.height, scale, tileSizeW, tileSizeH, gpuId, gpuThread, precision, prepadding, paramPath, modelPath);
+    d.waifu2x = new Waifu2x(gpuId, gpuThread, ttaMode);
+    d.waifu2x->noise = noise;
+    d.waifu2x->scale = scale;
+    d.waifu2x->tilesize_w = tileSizeW;
+    d.waifu2x->tilesize_h = tileSizeH;
+    d.waifu2x->prepadding = prepadding;
+
+    d.waifu2x->load(paramPath, modelPath);
+
     d.vi.width *= scale;
     d.vi.height *= scale;
 
-    auto *data = new FilterData{ d };
+    auto *data = new Waifu2xFilterData{ d };
 
-    vsapi->createFilter(in, out, "Waifu2x", filterInit, filterGetFrame, filterFree, fmParallel, 0, data, core);
-}
-
-VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin) {
-    configFunc("net.nlzy.vsw2xnvk", "w2xnvk", "VapourSynth Waifu2x NCNN Vulkan Plugin", VAPOURSYNTH_API_VERSION, 1, plugin);
-    registerFunc("Waifu2x", "clip:clip;"
-                            "noise:int:opt;"
-                            "scale:int:opt;"
-                            "model:int:opt;"
-                            "tile_size:int:opt;"
-                            "gpu_id:int:opt;"
-                            "gpu_thread:int:opt;"
-                            "precision:int:opt;"
-                            "tile_size_w:int:opt;"
-                            "tile_size_h:int:opt;"
-                            , filterCreate, nullptr, plugin);
+    vsapi->createFilter(in, out, "Waifu2x", Waifu2xFilterInit, Waifu2xFilterGetFrame, Waifu2xFilterFree, fmParallel, 0, data, core);
 }
